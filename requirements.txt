@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pandas
+folium
+shapely
+openrouteservice
+pyproj
+geopy
+openpyxl
