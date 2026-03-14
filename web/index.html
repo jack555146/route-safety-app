@@ -37,7 +37,7 @@
   </main>
 
   <script>
-  const API_BASE = `http://${location.hostname}:8000`;
+  const API_BASE = "";
   const $ = (id) => document.getElementById(id);
 
   $("run").addEventListener("click", async () => {
@@ -52,9 +52,9 @@
       }
 
       $("summary").style.display = "block";
-      $("summary").innerHTML = `分析中...<br>API_BASE: ${API_BASE}`;
+      $("summary").innerHTML = "分析中. . .";
 
-      const res = await fetch(`${API_BASE}/analyze`, {
+      const res = await fetch(`/analyze`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
