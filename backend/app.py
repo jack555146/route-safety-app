@@ -74,7 +74,7 @@ geolocator = Nominatim(user_agent="route_safety_app", timeout=10)
 
 DEFAULT_DIST_THRESHOLD_M = 10.0
 DEFAULT_CAP = 100.0
-DEFAULT_TARGET_ROUTES = 3
+DEFAULT_TARGET_ROUTES = 2
 DEFAULT_SHARE_FACTOR = 0.2
 DEFAULT_WEIGHT_FACTOR = 2.5
 
@@ -322,16 +322,41 @@ def analyze(req: Req):
 
     # 取得多條替代路線
     t0 = time.time()
-    route_geojson = client.directions(
-        coordinates=[start, end],
-        profile="driving-car",
-        format="geojson",
-        alternative_routes={
-            "target_count": target_routes,
-            "share_factor": share_factor,
-            "weight_factor": weight_factor
-        }
-    )
+    from openrouteservice.exceptions import ApiError
+
+# 先嘗試多路線
+try:
+    if target_routes > 1:
+        route_geojson = client.directions(
+            coordinates=[start, end],
+            profile="driving-car",
+            format="geojson",
+            alternative_routes={
+                "target_count": target_routes,
+                "share_factor": share_factor,
+                "weight_factor": weight_factor
+            }
+        )
+    else:
+        route_geojson = client.directions(
+            coordinates=[start, end],
+            profile="driving-car",
+            format="geojson"
+        )
+
+except ApiError as e:
+    msg = str(e)
+
+    # 如果是 ORS 多路線距離限制，就自動退回單一路線
+    if "alternative Routes algorithm" in msg or "must not be greater than 100000.0 meters" in msg:
+        route_geojson = client.directions(
+            coordinates=[start, end],
+            profile="driving-car",
+            format="geojson"
+        )
+    else:
+        return {"error": f"ORS 路線計算失敗：{msg}"}
+    
     routes_features = route_geojson.get("features", [])
     if not routes_features:
         return {"error": "ORS 沒有回傳路線，請換個起終點試試。"}
