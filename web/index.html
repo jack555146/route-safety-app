@@ -36,67 +36,77 @@
     <iframe id="map"></iframe>
   </main>
 
-  <script>
-  const API_BASE = "";
-  const $ = (id) => document.getElementById(id);
+ <script>
+const $ = (id) => document.getElementById(id);
 
-  $("run").addEventListener("click", async () => {
-    try {
-      const start = $("start").value.trim();
-      const end = $("end").value.trim();
-
-      if (!start || !end) {
-        $("summary").style.display = "block";
-        $("summary").innerHTML = "請輸入起點與終點";
-        return;
-      }
-
-      $("summary").style.display = "block";
-      $("summary").innerHTML = "分析中. . .";
-
-      const res = await fetch(`/analyze`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ start, end })
-      });
-
-      const text = await res.text();
-
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        $("summary").innerHTML = "後端回傳不是 JSON：<br>" + text;
-        return;
-      }
-
-      if (!res.ok) {
-        $("summary").innerHTML = "後端錯誤：<br>" + JSON.stringify(data);
-        return;
-      }
-
-      if (data.error) {
-        $("summary").innerHTML = "分析失敗：<br>" + data.error;
-        return;
-      }
-
-      $("summary").innerHTML = `
-        <div><b>🏁 最快</b>：路線 #${data.fastest.route_idx}｜${data.fastest.duration_min} 分</div>
-        <div style="margin-top:6px"><b>🛡 最安全</b>：路線 #${data.safest.route_idx}｜${data.safest.duration_min} 分</div>
-      `;
-
-      const blob = new Blob([data.map_html], { type: "text/html" });
-      const url = URL.createObjectURL(blob);
-      $("map").src = url;
-
-    } catch (err) {
-      $("summary").style.display = "block";
-      $("summary").innerHTML = "前端請求失敗：<br>" + err;
-      console.error(err);
+async function postAnalyze(payload, retries = 1) {
+  try {
+    const res = await fetch("/analyze", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+    return res;
+  } catch (err) {
+    if (retries > 0) {
+      await new Promise(r => setTimeout(r, 2500));
+      return postAnalyze(payload, retries - 1);
     }
-  });
+    throw err;
+  }
+}
+
+$("run").addEventListener("click", async () => {
+  try {
+    const start = $("start").value.trim();
+    const end = $("end").value.trim();
+
+    if (!start || !end) {
+      $("summary").style.display = "block";
+      $("summary").innerHTML = "請輸入起點與終點";
+      return;
+    }
+
+    $("summary").style.display = "block";
+    $("summary").innerHTML = "分析中...";
+    $("map").srcdoc = "";
+
+    const res = await postAnalyze({ start, end });
+
+    let data;
+    try {
+      data = await res.json();
+    } catch (err) {
+      $("summary").innerHTML = "伺服器暫時沒有正常回應，請稍後再試一次。";
+      return;
+    }
+
+    if (data.error) {
+      $("summary").innerHTML = "分析失敗：<br>" + data.error;
+      return;
+    }
+
+    let noticeHtml = "";
+    if (data.notice) {
+      noticeHtml = `<div style="margin-bottom:8px;color:#b45309;">⚠ ${data.notice}</div>`;
+    }
+
+    $("summary").innerHTML = `
+      ${noticeHtml}
+      <div><b>🏁 最快</b>：路線 #${data.fastest.route_idx}｜${data.fastest.duration_min} 分</div>
+      <div style="margin-top:6px"><b>🛡 最安全</b>：路線 #${data.safest.route_idx}｜${data.safest.duration_min} 分</div>
+    `;
+
+    $("map").srcdoc = data.map_html;
+
+  } catch (err) {
+    $("summary").style.display = "block";
+    $("summary").innerHTML = "前端請求失敗：<br>" + err;
+    console.error(err);
+  }
+});
 </script>
 </body>
 </html>

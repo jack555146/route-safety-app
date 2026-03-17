@@ -18,6 +18,17 @@ from pyproj import Transformer
 
 import openrouteservice
 from geopy.geocoders import Nominatim
+from math import radians, sin, cos, sqrt, atan2
+from fastapi.responses import JSONResponse
+from openrouteservice.exceptions import ApiError
+
+def haversine_km(lon1, lat1, lon2, lat2):
+    R = 6371.0
+    dlon = radians(lon2 - lon1)
+    dlat = radians(lat2 - lat1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    return R * c
 
 # ======================
 # FastAPI + CORS
@@ -283,263 +294,320 @@ def eval_one_route(feature, route_idx: int, accidents_df: pd.DataFrame, lat_col:
 # ======================
 @app.post("/analyze")
 def analyze(req: Req):
-    if ACCIDENTS is None or len(ACCIDENTS) == 0:
-        return {"error": f"找不到事故資料。請確認有 data/ 或 DATA/ 資料夾，路徑：{DATA_DIR}"}
-
-    start = place_to_lonlat(req.start)
-    end = place_to_lonlat(req.end)
-    if not start:
-        return {"error": f"找不到出發地：{req.start}"}
-    if not end:
-        return {"error": f"找不到目的地：{req.end}"}
-
-    dist_m = float(req.dist_m) if req.dist_m is not None else DEFAULT_DIST_THRESHOLD_M
-    cap = float(req.cap) if req.cap is not None else DEFAULT_CAP
-    target_routes = int(req.target_routes) if req.target_routes is not None else DEFAULT_TARGET_ROUTES
-    target_routes = max(1, min(3, target_routes))
-    share_factor = float(req.share_factor) if req.share_factor is not None else DEFAULT_SHARE_FACTOR
-    weight_factor = float(req.weight_factor) if req.weight_factor is not None else DEFAULT_WEIGHT_FACTOR
-
-    # 事故資料清理 & 欄位對應
-    accidents = ACCIDENTS.copy()
-
-    lat_col = pick_column(accidents.columns, ["緯度", "lat", "latitude", "y", "Lat", "LAT", "Y"])
-    lon_col = pick_column(accidents.columns, ["經度", "lon", "longitude", "x", "Lon", "LON", "X"])
-    if not lat_col or not lon_col:
-        return {"error": f"事故資料找不到經緯度欄位。欄位有：{list(accidents.columns)[:30]}"}
-
-    accidents[lat_col] = pd.to_numeric(accidents[lat_col], errors="coerce")
-    accidents[lon_col] = pd.to_numeric(accidents[lon_col], errors="coerce")
-    accidents = accidents.dropna(subset=[lat_col, lon_col]).reset_index(drop=True)
-
-    # 年數（用於年平均）
-    num_years = 1
-    if time_col in accidents.columns:
-        accidents["發生年份"] = accidents[time_col].apply(extract_year_roc)
-        valid_years = accidents["發生年份"].dropna().unique()
-        if len(valid_years) > 0:
-            num_years = len(valid_years)
-
-    t0 = time.time()
-
-    # 取得路線（先嘗試多路線，太遠就自動退回單一路線）
-    from openrouteservice.exceptions import ApiError
-
-    fallback_to_single = False
-
     try:
-        if target_routes > 1:
-            route_geojson = client.directions(
-                coordinates=[start, end],
-                profile="driving-car",
-                format="geojson",
-                alternative_routes={
-                    "target_count": target_routes,
-                    "share_factor": share_factor,
-                    "weight_factor": weight_factor
-                }
-            )
-        else:
-            route_geojson = client.directions(
-                coordinates=[start, end],
-                profile="driving-car",
-                format="geojson"
-            )
+        if ACCIDENTS is None or len(ACCIDENTS) == 0:
+            return {
+                "error": f"找不到事故資料。請確認有 data/ 或 DATA/ 資料夾，路徑：{DATA_DIR}",
+                "fastest": None,
+                "safest": None,
+                "map_html": "",
+                "notice": ""
+            }
 
-    except ApiError as e:
-        msg = str(e)
+        start = place_to_lonlat(req.start)
+        end = place_to_lonlat(req.end)
 
-        # 如果是 ORS 多路線距離限制，就自動退回單一路線
-        if "alternative Routes algorithm" in msg or "must not be greater than 100000.0 meters" in msg:
+        if not start:
+            return {
+                "error": f"找不到出發地：{req.start}",
+                "fastest": None,
+                "safest": None,
+                "map_html": "",
+                "notice": ""
+            }
+
+        if not end:
+            return {
+                "error": f"找不到目的地：{req.end}",
+                "fastest": None,
+                "safest": None,
+                "map_html": "",
+                "notice": ""
+            }
+
+        dist_m = float(req.dist_m) if req.dist_m is not None else DEFAULT_DIST_THRESHOLD_M
+        cap = float(req.cap) if req.cap is not None else DEFAULT_CAP
+        target_routes = int(req.target_routes) if req.target_routes is not None else DEFAULT_TARGET_ROUTES
+        target_routes = max(1, min(3, target_routes))
+        share_factor = float(req.share_factor) if req.share_factor is not None else DEFAULT_SHARE_FACTOR
+        weight_factor = float(req.weight_factor) if req.weight_factor is not None else DEFAULT_WEIGHT_FACTOR
+
+        # 長距離自動降級：避免 ORS 替代路線超過限制
+        straight_km = haversine_km(start[0], start[1], end[0], end[1])
+        fallback_to_single = False
+        notice_msg = ""
+
+        if straight_km > 35:
+            target_routes = 1
             fallback_to_single = True
-            route_geojson = client.directions(
-                coordinates=[start, end],
-                profile="driving-car",
-                format="geojson"
-            )
-        else:
-            return {"error": f"ORS 路線計算失敗：{msg}"}
+            notice_msg = "距離較遠，已自動改為單一路線模式"
 
-    routes_features = route_geojson.get("features", [])
-    if not routes_features:
-        return {"error": "ORS 沒有回傳路線，請換個起終點試試。"}
+        # 事故資料清理
+        accidents = ACCIDENTS.copy()
 
-    # 每條路線評估
-    results = []
-    for i, ft in enumerate(routes_features, start=1):
-        results.append(eval_one_route(ft, i, accidents, lat_col, lon_col, num_years, dist_m, cap))
+        lat_col = pick_column(accidents.columns, ["緯度", "lat", "latitude", "y", "Lat", "LAT", "Y"])
+        lon_col = pick_column(accidents.columns, ["經度", "lon", "longitude", "x", "Lon", "LON", "X"])
 
-    fastest = min(
-        [r for r in results if r["duration_min"] is not None],
-        key=lambda x: x["duration_min"],
-        default=None
-    )
-    safest = max(results, key=lambda x: x["safety_score"], default=None)
+        if not lat_col or not lon_col:
+            return {
+                "error": f"事故資料找不到經緯度欄位。欄位有：{list(accidents.columns)[:30]}",
+                "fastest": None,
+                "safest": None,
+                "map_html": "",
+                "notice": ""
+            }
 
-    # folium 地圖
-    center_lat = (start[1] + end[1]) / 2
-    center_lon = (start[0] + end[0]) / 2
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="OpenStreetMap")
+        accidents[lat_col] = pd.to_numeric(accidents[lat_col], errors="coerce")
+        accidents[lon_col] = pd.to_numeric(accidents[lon_col], errors="coerce")
+        accidents = accidents.dropna(subset=[lat_col, lon_col]).reset_index(drop=True)
 
-    folium.Marker([start[1], start[0]], popup=f"起點：{req.start}").add_to(m)
-    folium.Marker([end[1], end[0]], popup=f"終點：{req.end}").add_to(m)
+        # 年數（年平均用）
+        num_years = 1
+        if time_col in accidents.columns:
+            accidents["發生年份"] = accidents[time_col].apply(extract_year_roc)
+            valid_years = accidents["發生年份"].dropna().unique()
+            if len(valid_years) > 0:
+                num_years = len(valid_years)
 
-    # routes（所有）
-    layer_all = folium.FeatureGroup(name="routes（所有）", show=False)
-    folium.GeoJson(route_geojson).add_to(layer_all)
-    layer_all.add_to(m)
+        t0 = time.time()
 
-    color_map = {"A1": "red", "A2": "orange", "A3": "green"}
+        # 先嘗試路線計算
+        try:
+            if target_routes > 1:
+                route_geojson = client.directions(
+                    coordinates=[start, end],
+                    profile="driving-car",
+                    format="geojson",
+                    alternative_routes={
+                        "target_count": target_routes,
+                        "share_factor": share_factor,
+                        "weight_factor": weight_factor
+                    }
+                )
+            else:
+                route_geojson = client.directions(
+                    coordinates=[start, end],
+                    profile="driving-car",
+                    format="geojson"
+                )
 
-    def add_points_to_layer(records, layer):
-        for lat, lon, sev, popup in records:
-            c = color_map.get(sev, "gray")
-            folium.CircleMarker(
-                location=[lat, lon],
-                radius=3,
-                color=c,
-                fill=True,
-                fill_color=c,
-                fill_opacity=0.7,
-                popup=folium.Popup(popup, max_width=320),
-            ).add_to(layer)
+        except ApiError as e:
+            msg = str(e)
 
-    fast_idx = fastest["route_idx"] if fastest else None
-    safe_idx = safest["route_idx"] if safest else None
+            # ORS 多路線限制時，自動改成單一路線
+            if "alternative Routes algorithm" in msg or "must not be greater than 100000.0 meters" in msg:
+                fallback_to_single = True
+                notice_msg = "距離較遠，已自動改為單一路線模式"
+                route_geojson = client.directions(
+                    coordinates=[start, end],
+                    profile="driving-car",
+                    format="geojson"
+                )
+            else:
+                return {
+                    "error": f"ORS 路線計算失敗：{msg}",
+                    "fastest": None,
+                    "safest": None,
+                    "map_html": "",
+                    "notice": ""
+                }
 
-    for r in results:
-        ridx = r["route_idx"]
-        if ridx == fast_idx and ridx == safe_idx:
-            tag = f"🏁🛡 最快&最安全（#{ridx}）"
-        elif ridx == fast_idx:
-            tag = f"🏁 最快路線（#{ridx}）"
-        elif ridx == safe_idx:
-            tag = f"🛡 最安全路線（#{ridx}）"
-        else:
-            tag = f"路線 #{ridx}"
+        routes_features = route_geojson.get("features", [])
+        if not routes_features:
+            return {
+                "error": "ORS 沒有回傳路線，請換個起終點試試。",
+                "fastest": None,
+                "safest": None,
+                "map_html": "",
+                "notice": ""
+            }
 
-        show_route = (ridx == fast_idx) or (ridx == safe_idx)
-        layer_route = folium.FeatureGroup(name=tag, show=show_route)
-        folium.GeoJson(r["feature"]).add_to(layer_route)
-        layer_route.add_to(m)
+        # 每條路線評估
+        results = []
+        for i, ft in enumerate(routes_features, start=1):
+            results.append(eval_one_route(ft, i, accidents, lat_col, lon_col, num_years, dist_m, cap))
 
-        layer_pts = folium.FeatureGroup(name=f"事故點（{tag}）", show=False)
-        add_points_to_layer(r["danger_records"], layer_pts)
-        layer_pts.add_to(m)
+        fastest = min(
+            [r for r in results if r["duration_min"] is not None],
+            key=lambda x: x["duration_min"],
+            default=None
+        )
+        safest = max(results, key=lambda x: x["safety_score"], default=None)
 
-    folium.LayerControl(collapsed=False).add_to(m)
+        # 地圖
+        center_lat = (start[1] + end[1]) / 2
+        center_lon = (start[0] + end[0]) / 2
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="OpenStreetMap")
 
-    # 左下角資訊內容
-    fast_html = ""
-    safe_html = ""
-    notice_html = ""
+        folium.Marker([start[1], start[0]], popup=f"起點：{req.start}").add_to(m)
+        folium.Marker([end[1], end[0]], popup=f"終點：{req.end}").add_to(m)
 
-    if fallback_to_single:
-        notice_html = """
-        <div style="margin-bottom:8px; color:#b45309;">
-          ⚠ 距離較遠，已自動改為單一路線模式
+        layer_all = folium.FeatureGroup(name="routes（所有）", show=False)
+        folium.GeoJson(route_geojson).add_to(layer_all)
+        layer_all.add_to(m)
+
+        color_map = {"A1": "red", "A2": "orange", "A3": "green"}
+
+        def add_points_to_layer(records, layer):
+            for lat, lon, sev, popup in records:
+                c = color_map.get(sev, "gray")
+                folium.CircleMarker(
+                    location=[lat, lon],
+                    radius=3,
+                    color=c,
+                    fill=True,
+                    fill_color=c,
+                    fill_opacity=0.7,
+                    popup=folium.Popup(popup, max_width=320),
+                ).add_to(layer)
+
+        fast_idx = fastest["route_idx"] if fastest else None
+        safe_idx = safest["route_idx"] if safest else None
+
+        for r in results:
+            ridx = r["route_idx"]
+
+            if ridx == fast_idx and ridx == safe_idx:
+                tag = f"🏁🛡 最快&最安全（#{ridx}）"
+            elif ridx == fast_idx:
+                tag = f"🏁 最快路線（#{ridx}）"
+            elif ridx == safe_idx:
+                tag = f"🛡 最安全路線（#{ridx}）"
+            else:
+                tag = f"路線 #{ridx}"
+
+            show_route = (ridx == fast_idx) or (ridx == safe_idx)
+            layer_route = folium.FeatureGroup(name=tag, show=show_route)
+            folium.GeoJson(r["feature"]).add_to(layer_route)
+            layer_route.add_to(m)
+
+            layer_pts = folium.FeatureGroup(name=f"事故點（{tag}）", show=False)
+            add_points_to_layer(r["danger_records"], layer_pts)
+            layer_pts.add_to(m)
+
+        folium.LayerControl(collapsed=False).add_to(m)
+
+        # 資訊框
+        fast_html = ""
+        safe_html = ""
+        notice_html = ""
+
+        if notice_msg:
+            notice_html = f"""
+            <div style="margin-bottom:8px; color:#b45309;">
+              ⚠ {notice_msg}
+            </div>
+            """
+
+        if fastest:
+            fast_html = f"""
+            <b>🏁 最快路線（#{fastest['route_idx']}）</b><br>
+            時間：約 {fastest['duration_min']:.1f} 分<br>
+            距離：約 {fastest['distance_km']:.2f} km<br>
+            A1={fastest['count_a1']} / A2={fastest['count_a2']} / A3={fastest['count_a3']}<br>
+            每公里年平均事故：{fastest['accidents_per_km_year']:.2f}<br>
+            安全分數：{fastest['safety_score']:.1f}<br>
+            """
+
+        if safest:
+            safe_html = f"""
+            <b>🛡 最安全路線（#{safest['route_idx']}）</b><br>
+            時間：約 {safest['duration_min']:.1f} 分<br>
+            距離：約 {safest['distance_km']:.2f} km<br>
+            A1={safest['count_a1']} / A2={safest['count_a2']} / A3={safest['count_a3']}<br>
+            每公里年平均事故：{safest['accidents_per_km_year']:.2f}<br>
+            安全分數：{safest['safety_score']:.1f}<br>
+            """
+
+        info_html = f"""
+        <div id="info-toggle-btn"
+             onclick="toggleInfoPanel()"
+             style="
+                position: fixed;
+                bottom: 20px;
+                left: 20px;
+                z-index: 10001;
+                background: #111;
+                color: white;
+                padding: 10px 14px;
+                border-radius: 10px;
+                font-size: 14px;
+                cursor: pointer;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+             ">
+          顯示路線資訊
         </div>
-        """
 
-    if fastest:
-        fast_html = f"""
-        <b>🏁 最快路線（#{fastest['route_idx']}）</b><br>
-        時間：約 {fastest['duration_min']:.1f} 分<br>
-        距離：約 {fastest['distance_km']:.2f} km<br>
-        A1={fastest['count_a1']} / A2={fastest['count_a2']} / A3={fastest['count_a3']}<br>
-        每公里年平均事故：{fastest['accidents_per_km_year']:.2f}<br>
-        安全分數：{fastest['safety_score']:.1f}<br>
-        """
+        <div id="info-panel"
+             style="
+                position: fixed;
+                bottom: 70px;
+                left: 20px;
+                z-index: 10000;
+                background: white;
+                padding: 10px 12px;
+                border: 1px solid #ccc;
+                border-radius: 10px;
+                font-size: 13px;
+                max-width: 320px;
+                max-height: 55vh;
+                overflow-y: auto;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+                display: none;
+             ">
+          {notice_html}
+          <b>同一起終點：多路線比較</b><br>
+          距離門檻：{dist_m:.0f} m<br>
+          資料涵蓋：{num_years} 年事故<br>
+          cap（飽和上限）：{cap:.0f}<br>
+          <hr style="margin:6px 0;">
+          {fast_html}
+          <hr style="margin:6px 0;">
+          {safe_html}
+          <hr style="margin:6px 0;">
+          伺服器計算耗時：約 {time.time() - t0:.2f} 秒
+        </div>
 
-    if safest:
-        safe_html = f"""
-        <b>🛡 最安全路線（#{safest['route_idx']}）</b><br>
-        時間：約 {safest['duration_min']:.1f} 分<br>
-        距離：約 {safest['distance_km']:.2f} km<br>
-        A1={safest['count_a1']} / A2={safest['count_a2']} / A3={safest['count_a3']}<br>
-        每公里年平均事故：{safest['accidents_per_km_year']:.2f}<br>
-        安全分數：{safest['safety_score']:.1f}<br>
-        """
+        <script>
+        function toggleInfoPanel() {{
+            const panel = document.getElementById("info-panel");
+            const btn = document.getElementById("info-toggle-btn");
 
-    # 可開關資訊框
-    info_html = f"""
-    <div id="info-toggle-btn"
-         onclick="toggleInfoPanel()"
-         style="
-            position: fixed;
-            bottom: 20px;
-            left: 20px;
-            z-index: 10001;
-            background: #111;
-            color: white;
-            padding: 10px 14px;
-            border-radius: 10px;
-            font-size: 14px;
-            cursor: pointer;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-         ">
-      顯示路線資訊
-    </div>
-
-    <div id="info-panel"
-         style="
-            position: fixed;
-            bottom: 70px;
-            left: 20px;
-            z-index: 10000;
-            background: white;
-            padding: 10px 12px;
-            border: 1px solid #ccc;
-            border-radius: 10px;
-            font-size: 13px;
-            max-width: 320px;
-            max-height: 55vh;
-            overflow-y: auto;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-            display: none;
-         ">
-      {notice_html}
-      <b>同一起終點：多路線比較</b><br>
-      距離門檻：{dist_m:.0f} m<br>
-      資料涵蓋：{num_years} 年事故<br>
-      cap（飽和上限）：{cap:.0f}<br>
-      <hr style="margin:6px 0;">
-      {fast_html}
-      <hr style="margin:6px 0;">
-      {safe_html}
-      <hr style="margin:6px 0;">
-      伺服器計算耗時：約 {time.time() - t0:.2f} 秒
-    </div>
-
-    <script>
-    function toggleInfoPanel() {{
-        const panel = document.getElementById("info-panel");
-        const btn = document.getElementById("info-toggle-btn");
-
-        if (panel.style.display === "none" || panel.style.display === "") {{
-            panel.style.display = "block";
-            btn.innerText = "隱藏路線資訊";
-        }} else {{
-            panel.style.display = "none";
-            btn.innerText = "顯示路線資訊";
+            if (panel.style.display === "none" || panel.style.display === "") {{
+                panel.style.display = "block";
+                btn.innerText = "隱藏路線資訊";
+            }} else {{
+                panel.style.display = "none";
+                btn.innerText = "顯示路線資訊";
+            }}
         }}
-    }}
-    </script>
-    """
-    m.get_root().html.add_child(folium.Element(info_html))
+        </script>
+        """
+        m.get_root().html.add_child(folium.Element(info_html))
 
-    html = m.get_root().render()
+        html = m.get_root().render()
 
-    return {
-        "fastest": {
-            "route_idx": fastest["route_idx"] if fastest else 1,
-            "duration_min": round(fastest["duration_min"], 1) if fastest and fastest["duration_min"] else None
-        },
-        "safest": {
-            "route_idx": safest["route_idx"] if safest else 1,
-            "duration_min": round(safest["duration_min"], 1) if safest and safest["duration_min"] else None
-        },
-        "map_html": html,
-        "notice": "距離較遠，已自動改為單一路線模式" if fallback_to_single else ""
-    }
+        return {
+            "fastest": {
+                "route_idx": fastest["route_idx"] if fastest else 1,
+                "duration_min": round(fastest["duration_min"], 1) if fastest and fastest["duration_min"] else None
+            },
+            "safest": {
+                "route_idx": safest["route_idx"] if safest else 1,
+                "duration_min": round(safest["duration_min"], 1) if safest and safest["duration_min"] else None
+            },
+            "map_html": html,
+            "notice": notice_msg
+        }
 
+    except Exception as e:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "error": f"系統分析失敗：{str(e)}",
+                "fastest": None,
+                "safest": None,
+                "map_html": "",
+                "notice": ""
+            }
+        )
