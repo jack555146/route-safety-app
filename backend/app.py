@@ -296,7 +296,7 @@ def analyze(req: Req):
     dist_m = float(req.dist_m) if req.dist_m is not None else DEFAULT_DIST_THRESHOLD_M
     cap = float(req.cap) if req.cap is not None else DEFAULT_CAP
     target_routes = int(req.target_routes) if req.target_routes is not None else DEFAULT_TARGET_ROUTES
-    target_routes = max(1, min(3, target_routes))  # ORS target_count 通常最多 3
+    target_routes = max(1, min(3, target_routes))
     share_factor = float(req.share_factor) if req.share_factor is not None else DEFAULT_SHARE_FACTOR
     weight_factor = float(req.weight_factor) if req.weight_factor is not None else DEFAULT_WEIGHT_FACTOR
 
@@ -320,43 +320,46 @@ def analyze(req: Req):
         if len(valid_years) > 0:
             num_years = len(valid_years)
 
-    # 取得多條替代路線
     t0 = time.time()
+
+    # 取得路線（先嘗試多路線，太遠就自動退回單一路線）
     from openrouteservice.exceptions import ApiError
 
-# 先嘗試多路線
-try:
-    if target_routes > 1:
-        route_geojson = client.directions(
-            coordinates=[start, end],
-            profile="driving-car",
-            format="geojson",
-            alternative_routes={
-                "target_count": target_routes,
-                "share_factor": share_factor,
-                "weight_factor": weight_factor
-            }
-        )
-    else:
-        route_geojson = client.directions(
-            coordinates=[start, end],
-            profile="driving-car",
-            format="geojson"
-        )
+    fallback_to_single = False
 
-except ApiError as e:
-    msg = str(e)
+    try:
+        if target_routes > 1:
+            route_geojson = client.directions(
+                coordinates=[start, end],
+                profile="driving-car",
+                format="geojson",
+                alternative_routes={
+                    "target_count": target_routes,
+                    "share_factor": share_factor,
+                    "weight_factor": weight_factor
+                }
+            )
+        else:
+            route_geojson = client.directions(
+                coordinates=[start, end],
+                profile="driving-car",
+                format="geojson"
+            )
 
-    # 如果是 ORS 多路線距離限制，就自動退回單一路線
-    if "alternative Routes algorithm" in msg or "must not be greater than 100000.0 meters" in msg:
-        route_geojson = client.directions(
-            coordinates=[start, end],
-            profile="driving-car",
-            format="geojson"
-        )
-    else:
-        return {"error": f"ORS 路線計算失敗：{msg}"}
-    
+    except ApiError as e:
+        msg = str(e)
+
+        # 如果是 ORS 多路線距離限制，就自動退回單一路線
+        if "alternative Routes algorithm" in msg or "must not be greater than 100000.0 meters" in msg:
+            fallback_to_single = True
+            route_geojson = client.directions(
+                coordinates=[start, end],
+                profile="driving-car",
+                format="geojson"
+            )
+        else:
+            return {"error": f"ORS 路線計算失敗：{msg}"}
+
     routes_features = route_geojson.get("features", [])
     if not routes_features:
         return {"error": "ORS 沒有回傳路線，請換個起終點試試。"}
@@ -366,9 +369,11 @@ except ApiError as e:
     for i, ft in enumerate(routes_features, start=1):
         results.append(eval_one_route(ft, i, accidents, lat_col, lon_col, num_years, dist_m, cap))
 
-    fastest = min([r for r in results if r["duration_min"] is not None],
-                  key=lambda x: x["duration_min"],
-                  default=None)
+    fastest = min(
+        [r for r in results if r["duration_min"] is not None],
+        key=lambda x: x["duration_min"],
+        default=None
+    )
     safest = max(results, key=lambda x: x["safety_score"], default=None)
 
     # folium 地圖
@@ -424,9 +429,18 @@ except ApiError as e:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # 左下角資訊框
+    # 左下角資訊內容
     fast_html = ""
     safe_html = ""
+    notice_html = ""
+
+    if fallback_to_single:
+        notice_html = """
+        <div style="margin-bottom:8px; color:#b45309;">
+          ⚠ 距離較遠，已自動改為單一路線模式
+        </div>
+        """
+
     if fastest:
         fast_html = f"""
         <b>🏁 最快路線（#{fastest['route_idx']}）</b><br>
@@ -447,10 +461,44 @@ except ApiError as e:
         安全分數：{safest['safety_score']:.1f}<br>
         """
 
+    # 可開關資訊框
     info_html = f"""
-    <div style="position: fixed; bottom: 20px; left: 20px; z-index: 9999;
-                background: white; padding: 10px 12px; border: 1px solid #ccc;
-                border-radius: 10px; font-size: 13px; max-width: 320px;">
+    <div id="info-toggle-btn"
+         onclick="toggleInfoPanel()"
+         style="
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            z-index: 10001;
+            background: #111;
+            color: white;
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-size: 14px;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+         ">
+      顯示路線資訊
+    </div>
+
+    <div id="info-panel"
+         style="
+            position: fixed;
+            bottom: 70px;
+            left: 20px;
+            z-index: 10000;
+            background: white;
+            padding: 10px 12px;
+            border: 1px solid #ccc;
+            border-radius: 10px;
+            font-size: 13px;
+            max-width: 320px;
+            max-height: 55vh;
+            overflow-y: auto;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            display: none;
+         ">
+      {notice_html}
       <b>同一起終點：多路線比較</b><br>
       距離門檻：{dist_m:.0f} m<br>
       資料涵蓋：{num_years} 年事故<br>
@@ -462,12 +510,26 @@ except ApiError as e:
       <hr style="margin:6px 0;">
       伺服器計算耗時：約 {time.time() - t0:.2f} 秒
     </div>
+
+    <script>
+    function toggleInfoPanel() {{
+        const panel = document.getElementById("info-panel");
+        const btn = document.getElementById("info-toggle-btn");
+
+        if (panel.style.display === "none" || panel.style.display === "") {{
+            panel.style.display = "block";
+            btn.innerText = "隱藏路線資訊";
+        }} else {{
+            panel.style.display = "none";
+            btn.innerText = "顯示路線資訊";
+        }}
+    }}
+    </script>
     """
     m.get_root().html.add_child(folium.Element(info_html))
 
     html = m.get_root().render()
 
-    # 回傳給前端
     return {
         "fastest": {
             "route_idx": fastest["route_idx"] if fastest else 1,
@@ -477,6 +539,7 @@ except ApiError as e:
             "route_idx": safest["route_idx"] if safest else 1,
             "duration_min": round(safest["duration_min"], 1) if safest and safest["duration_min"] else None
         },
-        "map_html": html
+        "map_html": html,
+        "notice": "距離較遠，已自動改為單一路線模式" if fallback_to_single else ""
     }
 
