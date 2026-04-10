@@ -504,27 +504,27 @@ def analyze(req: Req):
             </div>
             """
 
-       if fastest:
-        fast_html = f"""
-        <b>🏁 最快路線（#{fastest['route_idx']}）</b><br>
-        時間：約 {fastest['duration_min']:.1f} 分<br>
-        距離：約 {fastest['distance_km']:.2f} km<br>
-        A1={fastest['count_a1']} / A2={fastest['count_a2']} / A3={fastest['count_a3']}<br>
-        死亡比：{fastest['death_ratio']:.1f}%<br>
-        每公里年平均事故：{fastest['accidents_per_km_year']:.2f}<br>
-        安全分數：{fastest['safety_score']:.1f}<br>
-        """
+        if fastest:
+            fast_html = f"""
+            <b>🏁 最快路線（#{fastest['route_idx']}）</b><br>
+            時間：約 {fastest['duration_min']:.1f} 分<br>
+            距離：約 {fastest['distance_km']:.2f} km<br>
+            A1={fastest['count_a1']} / A2={fastest['count_a2']} / A3={fastest['count_a3']}<br>
+            死亡比：{fastest['death_ratio']:.1f}%<br>
+            每公里年平均事故：{fastest['accidents_per_km_year']:.2f}<br>
+            安全分數：{fastest['safety_score']:.1f}<br>
+            """
 
-       if safest:
-        safe_html = f"""
-        <b>🛡 最安全路線（#{safest['route_idx']}）</b><br>
-        時間：約 {safest['duration_min']:.1f} 分<br>
-        距離：約 {safest['distance_km']:.2f} km<br>
-        A1={safest['count_a1']} / A2={safest['count_a2']} / A3={safest['count_a3']}<br>
-        死亡比：{safest['death_ratio']:.1f}%<br>
-        每公里年平均事故：{safest['accidents_per_km_year']:.2f}<br>
-        安全分數：{safest['safety_score']:.1f}<br>
-        """
+        if safest:
+            safe_html = f"""
+            <b>🛡 最安全路線（#{safest['route_idx']}）</b><br>
+            時間：約 {safest['duration_min']:.1f} 分<br>
+            距離：約 {safest['distance_km']:.2f} km<br>
+            A1={safest['count_a1']} / A2={safest['count_a2']} / A3={safest['count_a3']}<br>
+            死亡比：{safest['death_ratio']:.1f}%<br>
+            每公里年平均事故：{safest['accidents_per_km_year']:.2f}<br>
+            安全分數：{safest['safety_score']:.1f}<br>
+            """
 
         info_html = f"""
         <div id="info-toggle-btn"
