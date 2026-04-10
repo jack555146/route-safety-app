@@ -276,6 +276,9 @@ def eval_one_route(feature, route_idx: int, accidents_df: pd.DataFrame, lat_col:
     duration_s = float(summary.get("duration", 0.0))
     distance_m = float(summary.get("distance", 0.0))
 
+    total_accidents = count_a1 + count_a2 + count_a3
+    death_ratio = (count_a1 / total_accidents * 100) if total_accidents > 0 else 0.0
+
     return {
         "route_idx": route_idx,
         "feature": feature,
@@ -284,6 +287,8 @@ def eval_one_route(feature, route_idx: int, accidents_df: pd.DataFrame, lat_col:
         "count_a1": count_a1,
         "count_a2": count_a2,
         "count_a3": count_a3,
+        "total_accidents": total_accidents,
+        "death_ratio": death_ratio,
         "accidents_per_km_year": accidents_per_km_year,
         "safety_score": safety_score,
         "danger_records": danger_records,
@@ -499,25 +504,27 @@ def analyze(req: Req):
             </div>
             """
 
-        if fastest:
-            fast_html = f"""
-            <b>🏁 最快路線（#{fastest['route_idx']}）</b><br>
-            時間：約 {fastest['duration_min']:.1f} 分<br>
-            距離：約 {fastest['distance_km']:.2f} km<br>
-            A1={fastest['count_a1']} / A2={fastest['count_a2']} / A3={fastest['count_a3']}<br>
-            每公里年平均事故：{fastest['accidents_per_km_year']:.2f}<br>
-            安全分數：{fastest['safety_score']:.1f}<br>
-            """
+       if fastest:
+        fast_html = f"""
+        <b>🏁 最快路線（#{fastest['route_idx']}）</b><br>
+        時間：約 {fastest['duration_min']:.1f} 分<br>
+        距離：約 {fastest['distance_km']:.2f} km<br>
+        A1={fastest['count_a1']} / A2={fastest['count_a2']} / A3={fastest['count_a3']}<br>
+        死亡比：{fastest['death_ratio']:.1f}%<br>
+        每公里年平均事故：{fastest['accidents_per_km_year']:.2f}<br>
+        安全分數：{fastest['safety_score']:.1f}<br>
+        """
 
-        if safest:
-            safe_html = f"""
-            <b>🛡 最安全路線（#{safest['route_idx']}）</b><br>
-            時間：約 {safest['duration_min']:.1f} 分<br>
-            距離：約 {safest['distance_km']:.2f} km<br>
-            A1={safest['count_a1']} / A2={safest['count_a2']} / A3={safest['count_a3']}<br>
-            每公里年平均事故：{safest['accidents_per_km_year']:.2f}<br>
-            安全分數：{safest['safety_score']:.1f}<br>
-            """
+       if safest:
+        safe_html = f"""
+        <b>🛡 最安全路線（#{safest['route_idx']}）</b><br>
+        時間：約 {safest['duration_min']:.1f} 分<br>
+        距離：約 {safest['distance_km']:.2f} km<br>
+        A1={safest['count_a1']} / A2={safest['count_a2']} / A3={safest['count_a3']}<br>
+        死亡比：{safest['death_ratio']:.1f}%<br>
+        每公里年平均事故：{safest['accidents_per_km_year']:.2f}<br>
+        安全分數：{safest['safety_score']:.1f}<br>
+        """
 
         info_html = f"""
         <div id="info-toggle-btn"
